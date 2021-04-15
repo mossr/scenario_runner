@@ -176,9 +176,15 @@ class OpenScenarioConfiguration(ScenarioConfiguration):
             if ".xodr" in self.town:
                 with open(self.town) as od_file:
                     data = od_file.read()
+                index = data.find('<?xml')
+                data = data[index:]
+
                 old_map = ""
                 if wmap is not None:
                     old_map = wmap.to_opendrive()
+                    index = old_map.find('<?xml')
+                    old_map = old_map[index:]
+
                 if data != old_map:
                     self.logger.warning(" Wrong OpenDRIVE map in use. Forcing reload of CARLA world")
                     self.client.generate_opendrive_world(str(data))
