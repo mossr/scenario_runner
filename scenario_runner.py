@@ -59,7 +59,7 @@ class ScenarioRunner(object):
     ego_vehicles = []
 
     # Tunable parameters
-    client_timeout = 10.0  # in seconds
+    client_timeout = 20.0  # in seconds (NOTE: changed from 10.0)
     wait_for_world = 20.0  # in seconds
     frame_rate = 20.0      # in Hz
 
@@ -320,6 +320,11 @@ class ScenarioRunner(object):
                             break
 
         self.world = self.client.get_world()
+
+        # No rendering (of CARLA world)
+        # settings = self.world.get_settings()
+        # settings.no_rendering_mode = True
+        # self.world.apply_settings(settings)
 
         if self._args.sync:
             settings = self.world.get_settings()
@@ -597,9 +602,9 @@ def main():
     try:
         scenario_runner = ScenarioRunner(arguments)
         result = scenario_runner.run()
-
     finally:
         if scenario_runner is not None:
+            print("Destroying scenario runner.")
             scenario_runner.destroy()
             del scenario_runner
     return not result

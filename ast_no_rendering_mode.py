@@ -276,6 +276,119 @@ class HelpText(object):
 
 
 # ==============================================================================
+# -- CollisionSensor -----------------------------------------------------------
+# ==============================================================================
+
+
+class CollisionSensor(object):
+    """ Class for collision sensors"""
+
+    # def __init__(self, parent_actor, hud):
+    def __init__(self, parent_actor):
+        """Constructor method"""
+        self.sensor = None
+        self.history = []
+        self._parent = parent_actor
+        # self.hud = hud
+        world = self._parent.get_world()
+        blueprint = world.get_blueprint_library().find('sensor.other.collision')
+        self.sensor = world.spawn_actor(blueprint, carla.Transform(), attach_to=self._parent)
+        # We need to pass the lambda a weak reference to
+        # self to avoid circular reference.
+        weak_self = weakref.ref(self)
+        self.sensor.listen(lambda event: CollisionSensor._on_collision(weak_self, event))
+        self.collided = False
+
+    def get_collision_history(self):
+        """Gets the history of collisions"""
+        history = collections.defaultdict(int)
+        for frame, intensity in self.history:
+            history[frame] += intensity
+        return history
+
+    @staticmethod
+    def _on_collision(weak_self, event):
+        """On collision method"""
+        self = weak_self()
+        if not self:
+            return
+        actor_type = get_actor_display_name(event.other_actor)
+        # self.hud.notification('Collision with %r' % actor_type)
+        # print('Collision with %r' % actor_type)
+        self.collided = True
+        impulse = event.normal_impulse
+        intensity = math.sqrt(impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2)
+        self.history.append((event.frame, intensity))
+        if len(self.history) > 4000:
+            self.history.pop(0)
+
+# ==============================================================================
+# -- LaneInvasionSensor --------------------------------------------------------
+# ==============================================================================
+
+
+class LaneInvasionSensor(object):
+    """Class for lane invasion sensors"""
+
+    # def __init__(self, parent_actor, hud):
+    def __init__(self, parent_actor):
+        """Constructor method"""
+        self.sensor = None
+        self._parent = parent_actor
+        # self.hud = hud
+        world = self._parent.get_world()
+        bp = world.get_blueprint_library().find('sensor.other.lane_invasion')
+        self.sensor = world.spawn_actor(bp, carla.Transform(), attach_to=self._parent)
+        # We need to pass the lambda a weak reference to self to avoid circular
+        # reference.
+        weak_self = weakref.ref(self)
+        self.sensor.listen(lambda event: LaneInvasionSensor._on_invasion(weak_self, event))
+
+    @staticmethod
+    def _on_invasion(weak_self, event):
+        """On invasion method"""
+        self = weak_self()
+        if not self:
+            return
+        lane_types = set(x.type for x in event.crossed_lane_markings)
+        text = ['%r' % str(x).split()[-1] for x in lane_types]
+        # self.hud.notification('Crossed line %s' % ' and '.join(text))
+        print('Crossed line %s' % ' and '.join(text))
+
+# ==============================================================================
+# -- GnssSensor --------------------------------------------------------
+# ==============================================================================
+
+
+class GnssSensor(object):
+    """ Class for GNSS sensors"""
+
+    def __init__(self, parent_actor):
+        """Constructor method"""
+        self.sensor = None
+        self._parent = parent_actor
+        self.lat = 0.0
+        self.lon = 0.0
+        world = self._parent.get_world()
+        blueprint = world.get_blueprint_library().find('sensor.other.gnss')
+        self.sensor = world.spawn_actor(blueprint, carla.Transform(carla.Location(x=1.0, z=2.8)),
+                                        attach_to=self._parent)
+        # We need to pass the lambda a weak reference to
+        # self to avoid circular reference.
+        weak_self = weakref.ref(self)
+        self.sensor.listen(lambda event: GnssSensor._on_gnss_event(weak_self, event))
+
+    @staticmethod
+    def _on_gnss_event(weak_self, event):
+        """GNSS method"""
+        self = weak_self()
+        if not self:
+            return
+        self.lat = event.latitude
+        self.lon = event.longitude
+
+
+# ==============================================================================
 # -- ModuleHUD -----------------------------------------------------------------
 # ==============================================================================
 
@@ -784,6 +897,7 @@ class ModuleWorld(object):
         self.server_fps = 0.0
         self.simulation_time = 0
         self.server_clock = pygame.time.Clock()
+        self.frame_rate = 20.0 # in Hz
 
         # World data
         self.world = None
@@ -816,6 +930,11 @@ class ModuleWorld(object):
         self.hero_surface = None
         self.actors_surface = None
 
+        # Sensors
+        self.collision_sensor = None
+        self.lane_invasion_sensor = None
+        self.gnss_sensor = None
+
     def _get_data_from_carla(self):
         try:
             self.client = carla.Client(self.args.host, self.args.port)
@@ -826,6 +945,17 @@ class ModuleWorld(object):
             else:
                 world = self.client.load_world(self.args.map)
 
+            # No rendering (of CARLA world)
+            # settings = world.get_settings()
+            # settings.no_rendering_mode = True
+            # world.apply_settings(settings)
+
+            if self.args.sync:
+                settings = world.get_settings()
+                settings.synchronous_mode = True
+                settings.fixed_delta_seconds = 1.0 / self.frame_rate
+                world.apply_settings(settings)
+
             town_map = world.get_map()
             return (world, town_map)
 
@@ -834,6 +964,7 @@ class ModuleWorld(object):
             exit_game()
 
     def start(self):
+        print("ModuleWorld.start()")
         self.world, self.town_map = self._get_data_from_carla()
 
         # Create Surfaces
@@ -846,8 +977,8 @@ class ModuleWorld(object):
             show_spawn_points=self.args.show_spawn_points)
 
         # Store necessary modules
-        self.module_hud = module_manager.get_module(MODULE_HUD)
-        self.module_input = module_manager.get_module(MODULE_INPUT)
+        self.module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
+        self.module_input = MODULE_MANAGER.get_module(MODULE_INPUT)
 
         self.original_surface_size = min(self.module_hud.dim[0], self.module_hud.dim[1])
         self.surface_size = self.map_image.big_map_surface.get_width()
@@ -885,6 +1016,12 @@ class ModuleWorld(object):
         weak_self = weakref.ref(self)
         self.world.on_tick(lambda timestamp: ModuleWorld.on_world_tick(weak_self, timestamp))
 
+        # Set up sensors
+        self.collision_sensor = CollisionSensor(self.hero_actor)
+        self.lane_invasion_sensor = LaneInvasionSensor(self.hero_actor)
+        self.gnss_sensor = GnssSensor(self.hero_actor)
+
+
     def select_hero_actor(self):
         hero_vehicles = [actor for actor in self.world.get_actors(
         ) if 'vehicle' in actor.type_id and actor.attributes['role_name'] == 'hero']
@@ -917,6 +1054,7 @@ class ModuleWorld(object):
         if self.hero_actor is not None:
             self.hero_transform = self.hero_actor.get_transform()
         self.update_hud_info(clock)
+        # print(self.world.collision_sensor.get_collision_history()) # print out collision information
 
     def update_hud_info(self, clock):
         hero_mode_text = []
@@ -958,7 +1096,7 @@ class ModuleWorld(object):
         ]
 
         module_info_text = module_info_text
-        module_hud = module_manager.get_module(MODULE_HUD)
+        module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
         module_hud.add_info(self.name, module_info_text)
         module_hud.add_info('HERO', hero_mode_text)
 
@@ -1000,7 +1138,7 @@ class ModuleWorld(object):
                     break
                 vehicle_type = get_actor_display_name(vehicle, truncate=22)
                 info_text.append('% 5d %s' % (vehicle.id, vehicle_type))
-        module_manager.get_module(MODULE_HUD).add_info(
+        MODULE_MANAGER.get_module(MODULE_HUD).add_info(
             'NEARBY VEHICLES',
             info_text)
 
@@ -1233,8 +1371,14 @@ class ModuleWorld(object):
                                                translation_offset[1]))
 
     def destroy(self):
-        if self.spawned_hero is not None:
-            self.spawned_hero.destroy()
+        actors = [
+            self.collision_sensor.sensor,
+            self.lane_invasion_sensor.sensor,
+            self.gnss_sensor.sensor,
+            self.spawned_hero]
+        for actor in actors:
+            if actor is not None:
+                actor.destroy()
 # ==============================================================================
 # -- Input -----------------------------------------------------------
 # ==============================================================================
@@ -1249,10 +1393,11 @@ class ModuleInput(object):
         self.wheel_amount = 0.025
         self._steer_cache = 0.0
         self.control = None
-        self._autopilot_enabled = True
+        self._autopilot_enabled = True # False
 
     def start(self):
-        hud = module_manager.get_module(MODULE_HUD)
+        print("ModuleInput.start()")
+        hud = MODULE_MANAGER.get_module(MODULE_HUD)
         hud.notification("Press 'H' or '?' for help.", seconds=4.0)
 
     def render(self, display):
@@ -1270,11 +1415,11 @@ class ModuleInput(object):
                 if self._is_quit_shortcut(event.key):
                     exit_game()
                 elif event.key == K_h or (event.key == K_SLASH and pygame.key.get_mods() & KMOD_SHIFT):
-                    module_hud = module_manager.get_module(MODULE_HUD)
+                    module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
                     module_hud.help.toggle()
                 elif event.key == K_TAB:
-                    module_world = module_manager.get_module(MODULE_WORLD)
-                    module_hud = module_manager.get_module(MODULE_HUD)
+                    module_world = MODULE_MANAGER.get_module(MODULE_WORLD)
+                    module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
                     if module_world.hero_actor is None:
                         module_world.select_hero_actor()
                         self.wheel_offset = HERO_DEFAULT_SCALE
@@ -1288,19 +1433,19 @@ class ModuleInput(object):
                         module_world.hero_actor = None
                         module_hud.notification('Map Mode')
                 elif event.key == K_F1:
-                    module_hud = module_manager.get_module(MODULE_HUD)
+                    module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
                     module_hud.show_info = not module_hud.show_info
                 elif event.key == K_i:
-                    module_hud = module_manager.get_module(MODULE_HUD)
+                    module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
                     module_hud.show_actor_ids = not module_hud.show_actor_ids
                 elif isinstance(self.control, carla.VehicleControl):
                     if event.key == K_q:
                         self.control.gear = 1 if self.control.reverse else -1
                     elif event.key == K_m:
                         self.control.manual_gear_shift = not self.control.manual_gear_shift
-                        world = module_manager.get_module(MODULE_WORLD)
+                        world = MODULE_MANAGER.get_module(MODULE_WORLD)
                         self.control.gear = world.hero_actor.get_control().gear
-                        module_hud = module_manager.get_module(MODULE_HUD)
+                        module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
                         module_hud.notification('%s Transmission' % (
                             'Manual' if self.control.manual_gear_shift else 'Automatic'))
                     elif self.control.manual_gear_shift and event.key == K_COMMA:
@@ -1308,11 +1453,11 @@ class ModuleInput(object):
                     elif self.control.manual_gear_shift and event.key == K_PERIOD:
                         self.control.gear = self.control.gear + 1
                     elif event.key == K_p:
-                        world = module_manager.get_module(MODULE_WORLD)
+                        world = MODULE_MANAGER.get_module(MODULE_WORLD)
                         if world.hero_actor is not None:
                             self._autopilot_enabled = not self._autopilot_enabled
                             world.hero_actor.set_autopilot(self._autopilot_enabled)
-                            module_hud = module_manager.get_module(MODULE_HUD)
+                            module_hud = MODULE_MANAGER.get_module(MODULE_HUD)
                             module_hud.notification('Autopilot %s' % ('On' if self._autopilot_enabled else 'Off'))
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 4:
@@ -1353,7 +1498,7 @@ class ModuleInput(object):
             if isinstance(self.control, carla.VehicleControl):
                 self._parse_keys(clock.get_time())
                 self.control.reverse = self.control.gear < 0
-            world = module_manager.get_module(MODULE_WORLD)
+            world = MODULE_MANAGER.get_module(MODULE_WORLD)
             if (world.hero_actor is not None):
                 world.hero_actor.apply_control(self.control)
 
@@ -1365,58 +1510,105 @@ class ModuleInput(object):
 # ==============================================================================
 # -- Global Objects ------------------------------------------------------------
 # ==============================================================================
-module_manager = ModuleManager()
+MODULE_MANAGER = ModuleManager()
+DISPLAY = None
+WORLD_MODULE = None
+NUM_COLLISIONS = 0
 
 
 # ==============================================================================
 # -- Game Loop ---------------------------------------------------------------
 # ==============================================================================
 
+def game_loop_init(args):
+    global DISPLAY
+    global MODULE_MANAGER
+    global WORLD_MODULE
 
-def game_loop(args):
+    # Init Pygame
+    print("game_loop_init 1")
+    pygame.init()
+    print("game_loop_init 2")
+    DISPLAY = pygame.display.set_mode(
+        (args.width, args.height),
+        pygame.HWSURFACE | pygame.DOUBLEBUF)
+    print("game_loop_init 3")
+    pygame.display.set_caption(args.description)
+    print("game_loop_init 4")
+
+    font = pygame.font.Font(pygame.font.get_default_font(), 20)
+    text_surface = font.render('Rendering map...', True, COLOR_WHITE)
+    DISPLAY.blit(text_surface, text_surface.get_rect(center=(args.width / 2, args.height / 2)))
+    pygame.display.flip()
+    print("game_loop_init 5")
+
+    # Init modules
+    input_module = ModuleInput(MODULE_INPUT)
+    hud_module = ModuleHUD(MODULE_HUD, args.width, args.height)
+    WORLD_MODULE = ModuleWorld(MODULE_WORLD, args, timeout=2.0) # Changed from 2.0
+    print("game_loop_init 6")
+
+    # Register Modules
+    MODULE_MANAGER.register_module(WORLD_MODULE)
+    MODULE_MANAGER.register_module(hud_module)
+    MODULE_MANAGER.register_module(input_module)
+    print("game_loop_init 7")
+
+    MODULE_MANAGER.start_modules() # TODO. This is slow...can we speed it up/cache anything?
+    print("game_loop_init 8")
+
+def rerun_game_loop():
+    print("Rerun game loop...")
+    # MODULE_MANAGER.start_modules() # TODO. This is slow...can we speed it up/cache anything?
+    WORLD_MODULE.select_hero_actor()
+    WORLD_MODULE.hero_actor.set_autopilot(True)
+    WORLD_MODULE.module_input.wheel_offset = HERO_DEFAULT_SCALE
+    WORLD_MODULE.module_input.control = carla.VehicleControl()
+    # TODO: how to reset the "enviroment" agent from Scenario Runner.
+    print("ModuleManager started.")
+    game_loop()
+
+
+def game_loop():
+    global NUM_COLLISIONS
     try:
-        # Init Pygame
-        pygame.init()
-        display = pygame.display.set_mode(
-            (args.width, args.height),
-            pygame.HWSURFACE | pygame.DOUBLEBUF)
-        pygame.display.set_caption(args.description)
-
-        font = pygame.font.Font(pygame.font.get_default_font(), 20)
-        text_surface = font.render('Rendering map...', True, COLOR_WHITE)
-        display.blit(text_surface, text_surface.get_rect(center=(args.width / 2, args.height / 2)))
-        pygame.display.flip()
-
-        # Init modules
-        input_module = ModuleInput(MODULE_INPUT)
-        hud_module = ModuleHUD(MODULE_HUD, args.width, args.height)
-        world_module = ModuleWorld(MODULE_WORLD, args, timeout=2.0)
-
-        # Register Modules
-        module_manager.register_module(world_module)
-        module_manager.register_module(hud_module)
-        module_manager.register_module(input_module)
-
-        module_manager.start_modules()
-
+        # game_loop_init was already performed.
         clock = pygame.time.Clock()
+        print("game_loop 9")
         while True:
             clock.tick_busy_loop(60)
 
-            module_manager.tick(clock)
-            module_manager.render(display)
+            MODULE_MANAGER.tick(clock)
+            MODULE_MANAGER.render(DISPLAY)
 
             pygame.display.flip()
+
+            # TODO:
+            # AST agent (i.e., "no render") is not destroying the vehicles.
+
+            # Check collision / end of simulation
+            if WORLD_MODULE.collision_sensor.collided:
+                WORLD_MODULE.collision_sensor.collided = False
+                print("Collided! We will break out of the simulation loop now.")
+                NUM_COLLISIONS += 1
+                break
+            if len(WORLD_MODULE._split_actors()[0]) == 0:
+                print("End of simulation.")
+                break
+
 
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')
 
     finally:
-        if world_module is not None:
-            world_module.destroy()
+        print("hit finally!")
+        if WORLD_MODULE is not None:
+            print("game_loop destroy")
+            # WORLD_MODULE.destroy()
+            # TODO: just destroy the actors? Or leave them to be reset?
 
 def exit_game():
-    module_manager.clear_modules()
+    MODULE_MANAGER.clear_modules()
     pygame.quit()
     sys.exit()
 
@@ -1425,7 +1617,7 @@ def exit_game():
 # ==============================================================================
 
 
-def main():
+def parse_args():
     # Parse arguments
     argparser = argparse.ArgumentParser(
         description='CARLA No Rendering Mode Visualizer')
@@ -1477,18 +1669,33 @@ def main():
         '--show-spawn-points',
         action='store_true',
         help='show recommended spawn points')
+    argparser.add_argument(
+        '--sync',
+        action='store_true',
+        help='Forces the simulation to run synchronously')
+
 
     args = argparser.parse_args()
     args.description = argparser.description
     args.width, args.height = [int(x) for x in args.res.split('x')]
+    return args
 
+
+def setup_logging(args):
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
-
     logging.info('listening to server %s:%s', args.host, args.port)
     print(__doc__)
 
-    game_loop(args)
 
-if __name__ == '__main__':
-    main()
+def main(port):
+# def main():
+    args = parse_args()
+    args.port = int(port)
+    # args.sync = True # NOTE, doesn't work as expected.
+    setup_logging(args)
+    game_loop_init(args)
+    game_loop()
+
+# if __name__ == '__main__':
+#     main()
